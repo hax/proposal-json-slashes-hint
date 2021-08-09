@@ -1,60 +1,163 @@
-# template-for-proposals
+# JSON `\//` Hint
 
-A repository template for ECMAScript proposals.
+## Problems
 
-## Before creating a proposal
+```js
+JSON.stringify({x: 1234567890n}) // throw!
+```
 
-Please ensure the following:
-  1. You have read the [process document](https://tc39.github.io/process-document/)
-  1. You have reviewed the [existing proposals](https://github.com/tc39/proposals/)
-  1. You are aware that your proposal requires being a member of TC39, or locating a TC39 delegate to "champion" your proposal
+You can custom it
 
-## Create your proposal repo
+```js
+BigInt.prototype.toJSON = function () { return this.toString() }
+JSON.stringify({x: 1234567890n}) // {"x": "1234567890"}
+```
 
-Follow these steps:
-  1.  Click the green ["use this template"](https://github.com/tc39/template-for-proposals/generate) button in the repo header. (Note: Do not fork this repo in GitHub's web interface, as that will later prevent transfer into the TC39 organization)
-  1.  Go to your repo settings “Options” page, under “GitHub Pages”, and set the source to the **main branch** under the root (and click Save, if it does not autosave this setting)
-      1. check "Enforce HTTPS"
-      1. On "Options", under "Features", Ensure "Issues" is checked, and disable "Wiki", and "Projects" (unless you intend to use Projects)
-      1. Under "Merge button", check "automatically delete head branches"
-<!--
-  1.  Avoid merge conflicts with build process output files by running:
-      ```sh
-      git config --local --add merge.output.driver true
-      git config --local --add merge.output.driver true
-      ```
-  1.  Add a post-rewrite git hook to auto-rebuild the output on every commit:
-      ```sh
-      cp hooks/post-rewrite .git/hooks/post-rewrite
-      chmod +x .git/hooks/post-rewrite
-      ```
--->
-  3.  ["How to write a good explainer"][explainer] explains how to make a good first impression.
+It works, but your application need to know `x` is a bigint to deserialize
+it correctly. It's likely you will hard code your schema logic.
 
-      > Each TC39 proposal should have a `README.md` file which explains the purpose
-      > of the proposal and its shape at a high level.
-      >
-      > ...
-      >
-      > The rest of this page can be used as a template ...
+A much serious problem is, in big project, you or your workmate will introduce
+many libraries directly or indirectly (node_modules black hole :-P ), some lib
+may also want to add their "better" version to `BigInt.prototype`, which may
+override yours, or yours override theirs :( , both can cause bugs, and such
+bugs coud be very hard to discover and locate.
 
-      Your explainer can point readers to the `index.html` generated from `spec.emu`
-      via markdown like
+```js
+// "better" version
+BigInt.prototype.toJSON = function () {
+	return {
+		"type": "BigInt",
+		data: convertBigIntToInt16Array(this),
+	}
+}
+JSON.stringify({x: 1234567890n}) // {"x":{"type":"BigInt",data:[722,18838]}}
+```
 
-      ```markdown
-      You can browse the [ecmarkup output](https://ACCOUNT.github.io/PROJECT/)
-      or browse the [source](https://github.com/ACCOUNT/PROJECT/blob/HEAD/spec.emu).
-      ```
+Even one day most of us all adopt this better version, there is still a question,
+if you happened have a normal object has the same shape, how can we differatiate
+them?
 
-      where *ACCOUNT* and *PROJECT* are the first two path elements in your project's Github URL.
-      For example, for github.com/**tc39**/**template-for-proposals**, *ACCOUNT* is "tc39"
-      and *PROJECT* is "template-for-proposals".
+Some other similar cases:
 
+```js
+// schemaless string
+JSON.stringify({x: new Date(0)}) // "1970-01-01T00:00:00.000Z"
 
-## Maintain your proposal repo
+// schemaless object
+JSON.stringify(Buffer.from('hello')) // {"type":"Buffer","data":[104,101,108,108,111]}
+```
 
-  1. Make your changes to `spec.emu` (ecmarkup uses HTML syntax, but is not HTML, so I strongly suggest not naming it ".html")
-  1. Any commit that makes meaningful changes to the spec, should run `npm run build` and commit the resulting output.
-  1. Whenever you update `ecmarkup`, run `npm run build` and commit any changes that come from that dependency.
+One possible solution is use some special keys like `"@type"` instead of too
+common `"type"`, and/or use escaped form for same shape. (TODO: add escaped example)
 
-  [explainer]: https://github.com/tc39/how-we-work/blob/HEAD/explainer.md
+But `"@type"` already be used by libraries or even standards like JSON-LD.
+`"%type"` seems much rarely used, but actually also already
+[be used in some code base](https://github.com/search?q=%22%25TYPE%22+extension%3Ajson&type=Code), it's hard to guarantee a syntax is "special" enough and never be used in any
+json file in the world.
+
+And escaped form normally have bad readability for people, and have the risk
+of inflating quickly in the mistaken of incompatible implementations combination.
+
+## Constraints
+
+- We can't change/extend the syntax of JSON! Even the simplest comments!
+- Convention based solution is questionable, because the community of JS is very 
+	large and divergent, the community of JSON is even much large and divergent.
+
+## Proposal
+
+```js
+JSON.stringify({x: 1n}, magicOptionsToEnableBigIntAndOtherDatatypes, '\t')
+```
+
+generate:
+
+```json
+{
+	"x": "\//@JS:42n"
+}
+```
+
+and could be deserialize back to `{x: 1n}` by `JSON.parse` automatically
+if parser understand the `\//` hint.
+
+If parser don't understand the hint, it just deserialize it to `{x: "//@JS:42n"}`.
+
+## `\//` hint
+
+`\//` hint: an escaped `/` followed by a normal, unescaped `/`
+
+JSON parsers (and people) could easily recognize this.
+
+It's valid JSON string, normally tools don't escape `/`, or escape all `/`
+(PHP `json_encode()` by default), or only escape `</` case for `</script>`.
+
+Some tools use similar trick, eg. https://weblogs.asp.net/bleroy/dates-and-json.
+
+As far as I can see, it's hopefully no implementation in any langauges or libraries would 
+generate both escaped `/` and unescaped `/` in single JSON string value. 
+So we can use it as a hint!
+
+## Process mode
+
+- A meta string is a string contains `\//` hint
+- A meta key is a key in meta string
+
+There are several possible options if parsers meet a meta string/key
+and don't understand it:
+
+- ignore it (deserialize it as normal strings/keys)
+- report error
+- drop the meta string or the meta key and corresponding value
+- allow user provide custom subroutine (it could be a special hint hook, or
+	a general mechnism like https://github.com/tc39/proposal-json-parse-with-source)
+- combinations of above
+
+## Possible proposals based on `\//` hint
+
+```json5
+// Not real valid JSON because JSON hate comments :)
+{
+	// unsuppported in JSON
+	"undefined": "\//JS:undefined",
+	"NaN": "\//JS:NaN",
+	"-NaN": "\//JS:-NaN", // see signbit issue
+
+	// would come from source 1e999, so allow serialize it accurately
+	"+Infinity": "\//JS:Infinity",
+	"-Infinity": "\//JS:-Infinity",
+	"null": "\//JS:null",
+
+	// common cases
+	"bigint": "\//JS:42n",
+	"legacyDate": "\//JS:Date!2020-01-01T00:00:00.0Z",
+	"date": "\//JS:Temporal.Date!2020-01-01",
+	"buffer": "\//JS:ArrayBuffer!SGVsbG8=",
+
+	// Node.js Buffer style
+	"buffer": {
+		"\// type": "node:Buffer",
+		"\// data": [1, 2, 3]
+	},
+
+	// key annotation style
+	"int8array": [1, 2, 3],
+	"int8array \// type": "JS:Int8Array",
+	
+	"tuple": [1, 2, 3],
+	"tuple \// type": "JS:tuple" // #[1, 2, 3]
+}
+```
+
+## Compliance requirements of JSON implementations
+
+This part seems beyond the scope of TC39, maybe JSON RFC docucment?
+
+1. Implementations should not generate a json string value with both unescaped
+	`/` and escaped `/` except `\//` hint
+0. Implementations should only generate one `\//` hint in one string value
+0. `\//FOO:...` syntax is for standard bodys, for example `\//JS:` is for TC39
+0. `\//x-FOO:...` syntax could be used for implementation-defined extensions
+0. All other forms (like `\//type`, `\//data`) are reserved for cross-platform
+	JSON standards
+0. Spaces are allowed after `\//`, aka `"\// type` is just same as `"\//type"`
